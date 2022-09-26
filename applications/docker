@@ -1,0 +1,25 @@
+DOCKER_COMPOSE_YAML="${DOCKER_COMPOSE_YAML:-/etc/rpi-system-update-compose.yml}"
+DOCKER_SERVICE_NAME="${DOCKER_SERVICE_NAME:-}"
+
+configure_application() {
+   [ -f "${DOCKER_COMPOSE_YAML}" ] || die "Missing docker YML: ${DOCKER_COMPOSE_YAML}"
+   [ -n "${DOCKER_SERVICE_NAME}" ] || die "DOCKER_SERVICE_NAME env not defined"
+
+   log "Configuring ${DOCKER_SERVICE_NAME}"
+   mkdir -p "${APPLICATION_MOUNT}/docker"  || die "Failed to create docker directory"
+   chgrp docker "${APPLICATION_MOUNT}/docker"
+
+   cd "${APPLICATION_MOUNT}"
+   mkdir -p "${DOCKER_SERVICE_NAME}" || die "Failed to create $(pwd)/${DOCKER_SERVICE_NAME}"
+   cd "${DOCKER_SERVICE_NAME}"
+   cp -f "${DOCKER_COMPOSE_YAML}" docker-compose.yml
+}
+
+do_monitor() {
+    UI_MODE=1
+    while true; do
+        rm -f "${LOG_FILE}"
+        log "$(docker stats -a --no-stream=true)"
+        sleep 10
+    done
+}

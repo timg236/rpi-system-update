@@ -1,0 +1,61 @@
+#!/bin/sh
+
+set -e
+
+script_dir=$(cd "$(dirname "$0")" && pwd)
+BUILD_DIR="${BUILD_DIR:-${script_dir}/../..}"
+
+die() {
+   echo "$@" >&2
+   exit 1
+}
+
+usage() {
+   cat << EOF
+$(basename $0): <server-dir> <version>
+
+    server-dir: The output directory for the update images.
+       version: The version number of the release or "net-install".
+
+EOF
+exit 1
+}
+
+server_dir="${1}"
+version="${2}"
+
+[ -n "${version}" ] || usage
+[ -d "${server_dir}" ] || die "Server directory ${server_dir} not found"
+[ -d "${BUILD_DIR}" ] || die "Build directory ${BUILD_DIR} not found"
+
+TOOL_DIR="${BUILD_DIR}/usbboot/tools"
+. "${script_dir}/config"
+
+if [ "${version}" = "net-install" ]; then
+   output_dir="${server_dir}/net-install"
+   rm -rf "${output_dir}"
+   mkdir -p "${output_dir}"
+   cp -f "${BUILD_DIR}/buildroot-net-install/output/images/boot.img" "${output_dir}"
+   echo "Updated ${output_dir}/boot.img"
+   cp -f "${BUILD_DIR}/buildroot-net-install/output/images/boot.sig" "${output_dir}"
+   echo "Updated ${output_dir}/boot.sig"
+else
+   output_dir="${server_dir}/releases/${version}"
+   rm -rf "${output_dir}"
+   mkdir -p "${output_dir}"
+   cp -f "${BUILD_DIR}/buildroot/output/images/boot.img.gz" "${output_dir}"
+   cp -f "${BUILD_DIR}/buildroot/output/images/boot.sig" "${output_dir}"
+
+   (
+   cd "${server_dir}"
+   cat > version <<EOF
+version: ${version}
+signature-url: ${URL_PREFIX}/releases/${version}/boot.sig
+image-url: ${URL_PREFIX}/releases/${version}/boot.img.gz
+EOF
+   "${TOOL_DIR}/rpi-eeprom-digest" -i version -o version.sig -k "${KEY_FILE}"
+   echo "Updated $(pwd)/version"
+   echo
+   cat version
+   )
+fi

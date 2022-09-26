@@ -1,0 +1,54 @@
+#!/bin/sh
+
+set -e
+
+script_dir=$(cd "$(dirname "$0")" && pwd)
+BUILD_DIR="${BUILD_DIR:-${script_dir}/../..}"
+
+die() {
+   echo "$@" >&2
+   exit 1
+}
+
+usage() {
+   cat << EOF
+$(basename $0): <server-dir>
+
+    server-dir: The output directory for rpi-eeprom-recovery.zip
+EOF
+exit 1
+}
+
+TMP_DIR=""
+cleanup() {
+   if [ -f "${TMP_DIR}" ]; then
+      rm -rf "${TMP_DIR}"
+   fi
+}
+
+. "${script_dir}/config"
+server_dir="${1}"
+TOOL_DIR="${BUILD_DIR}/usbboot/tools"
+
+# Default is to use the latest secure-boot release from usbboot. However,
+# this can be overridden by specifying an alternate file via the
+# RPI_EEPROM_IMAGE environment variable.
+RPI_EEPROM_IMAGE="${RPI_EEPROM_IMAGE:-${TOOL_DIR}/../secure-boot-recovery/pieeprom.original.bin}"
+
+[ -d "${server_dir}" ] || die "Server directory ${server_dir} not found"
+
+TMP_DIR="$(mktemp -d)"
+trap cleanup EXIT
+
+rm -f "${server_dir}/rpi-eeprom-recovery.zip"
+
+cp -f "${script_dir}/boot.conf" "${TMP_DIR}"
+cp -f "${TOOL_DIR}/../recovery.bin" "${TMP_DIR}"
+echo "Source EEPROM image ${RPI_EEPROM_IMAGE}"
+cp -f "${RPI_EEPROM_IMAGE}" "${TMP_DIR}/pieeprom.original.bin"
+(
+   cd "${TMP_DIR}"
+   "${TOOL_DIR}/update-pieeprom.sh" -k "${KEY_FILE}"
+   zip rpi-eeprom-recovery.zip recovery.bin pieeprom.bin pieeprom.sig
+)
+cp -f "${TMP_DIR}/rpi-eeprom-recovery.zip" "${server_dir}"

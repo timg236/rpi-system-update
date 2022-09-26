@@ -1,0 +1,8 @@
+[Unit]
+Description=Download OS updates.
+After=boot.mount network.target rpi-system-update.service network-online.target time-sync.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/rpi-system-update -d
+

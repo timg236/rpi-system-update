@@ -1,0 +1,637 @@
+#!/bin/sh
+
+set -e
+
+if [ -f /etc/default/rpi-system-update ]; then
+   . /etc/default/rpi-system-update
+fi
+
+# Configuration
+UPDATE_URL="${UPDATE_URL:-}"
+CURRENT_VERSION="${VERSION:-0}"
+BOOTFS_AUTO=${BOOTFS_AUTO:-/boot/auto}
+BOOTFS_A=${BOOTFS_A:-/boot/boota}
+BOOTFS_B=${BOOTFS_B:-/boot/bootb}
+PUBLIC_KEY="${PUBLIC_KEY:-}"
+BOOT_PARTITION_MB="${BOOT_PARTITION_MB:-256}"
+# If 1, then never show the UI.
+DISABLE_UI="${DISABLE_UI:-0}"
+AUTOBOOT_DEV="${AUTOBOOT_DEV:-${BOOT_BLKDEV}p1}"
+BOOTA_DEV="${BOOTA_DEV:-${BOOT_BLKDEV}p2}"
+BOOTB_DEV="${BOOTV_DEV:-${BOOT_BLKDEV}p3}"
+APPLICATION_DEV="${APPLICATION_DEV:-${BOOT_BLKDEV}p4}"
+APPLICATION_MOUNT="${APPLICATION_MOUNT:-/var/data}"
+NEWT_COLORS="${NEWT_COLORS:-root=blue,blue window=,white border=black,white textbox=black,white button=black,white shadow=,black}"
+SWAPFILE_MB=${SWAPFILE_MB:-0}
+RPI_SYSTEM_UPDATE_FUNCTIONS=${RPI_SYSTEM_UPDATE_FUNCTIONS:-/usr/lib/rpi-system-update/functions}
+ENCRYPT_APPLICATION_FS=${ENCRYPT_APPLICATION_FS:-0}
+
+# Constants
+DT_BOOTLOADER_TRYBOOT=/proc/device-tree/chosen/bootloader/tryboot
+DT_BOOTLOADER_PARTITION=/proc/device-tree/chosen/bootloader/partition
+
+# Globals
+UI_MODE=0
+LATEST_VERSION=0
+LATEST_IMAGE_URL=
+LATEST_SIGNATURE_URL=
+TRYBOOT=
+TRYBOOT_VER=
+BOOTFS=
+TRYBOOTFS=
+TRYBOOT_PENDING_FILE=
+LOG_FILE=
+script_name="$0"
+
+update_status() {
+   ETH0_IP4_ADDR="$(ip addr show dev eth0 | grep "inet " | awk '{print $2}')"
+   WLAN0_IP4_ADDR="$(ip addr show dev wlan0 | grep "inet " | awk '{print $2}')"
+}
+
+log() {
+    if [ "${DISABLE_UI}" != 1 ] && [ "${UI_MODE}" = 1 ]; then
+        if [ "${1}" = "-n" ]; then
+            shift
+            echo -n "$@" >> "${LOG_FILE}"
+        else
+            echo "$@" >> "${LOG_FILE}"
+            update_status
+            TERM=linux NEWT_COLORS="${NEWT_COLORS}" \
+               whiptail \
+               --title "Raspberry Pi - system-update v${CURRENT_VERSION} eth0: ${ETH0_IP4_ADDR} wlan: ${WLAN0_IP4_ADDR} $(date)" \
+               --infobox "$(tail -n 18 "${LOG_FILE}")" 20 150
+        fi
+    else
+        if [ "${1}" = "-n" ]; then
+            shift
+        fi
+        echo "$@"
+    fi
+}
+
+log_error() {
+    if [ "${DISABLE_UI}" != 1 ] && [ "${UI_MODE}" = 1 ]; then
+        log "$@"
+    fi
+    echo "$@" >&2
+}
+
+die() {
+    log_error "$@" >&2
+    exit 1
+}
+
+cleanup() {
+    if [ -d "${TMP_DIR}" ]; then
+        rm -rf "${TMP_DIR}"
+    fi
+}
+
+download_file() {
+    tries=1
+    while [ ${tries} -ge 1 ]; do
+        log "Downloading ${1}"
+        if curl -s "${1}" > "${2}"; then
+            return 0
+        fi
+        tries=$((tries - 1))
+    done
+    return 1
+}
+
+download_compressed() {
+   tries=1
+   while [ ${tries} -ge 1 ]; do
+       log "Downloading ${1}"
+       if curl -s "${1}" | gunzip > "${2}"; then
+           return 0
+       fi
+       tries=$((tries - 1))
+   done
+   return 1
+}
+
+get_boot_partition() {
+    partnum=$(printf "%d" "0x$(od "${DT_BOOTLOADER_PARTITION}" -v -An -t x1 | tr -d ' ' )")
+
+    if [ "${partnum}" = 0 ] || [ "${partnum}" = 1 ]; then
+       # Initial setup - just write to partition A
+       TRYBOOTFS="${BOOTFS_A}"
+       BOOTFS="${BOOTFS_A}"
+    elif [ "${partnum}" = 2 ]; then
+       BOOTFS="${BOOTFS_A}"
+       TRYBOOTFS="${BOOTFS_B}"
+    elif [ "${partnum}" = 3 ]; then
+       # Booted from B
+       BOOTFS="${BOOTFS_B}"
+       TRYBOOTFS="${BOOTFS_A}"
+    else
+       die "Boot partition ${partnum} not recognized"
+    fi
+    TRYBOOT_PENDING_FILE="${TRYBOOTFS}/tryboot.pending"
+}
+
+get_version() {
+    version_file="${TMP_DIR}/version"
+    version_sig="${TMP_DIR}/version.sig"
+    rm -f "${version_file}" "${version_sig}"
+
+    if ! download_file "${UPDATE_URL}.sig" "${version_sig}"; then
+       log_error "Failed to download version signature from \"${UPDATE_URL}.sig\""
+       return 1
+    fi
+
+    if ! download_file "${UPDATE_URL}" "${version_file}"; then
+       log_error "Failed to get version information from \"${UPDATE_URL}\""
+       return 1
+    fi
+
+    if ! rpi-eeprom-digest -i "${version_file}" -k "${PUBLIC_KEY}" -v "${version_sig}"; then
+       cat "${version_sig}"
+       log_error "Unable to verify \"${UPDATE_URL}\""
+       return 1
+    fi
+
+    LATEST_VERSION=$(grep 'version:' "${version_file}" | cut -f 2 -d ' ')
+    LATEST_IMAGE_URL=$(grep 'image-url:' "${version_file}" | cut -f 2 -d ' ')
+    LATEST_SIGNATURE_URL=$(grep 'signature-url:' "${version_file}" | cut -f 2 -d ' ')
+
+    if [ -z "${LATEST_VERSION}" ]; then
+       log_error "version field missing in ${UPDATE_URL}"
+       log_error "$(cat "${version_file}")"
+       return 1
+    fi
+
+    if [ -z "${LATEST_SIGNATURE_URL}" ]; then
+       log_error "signature-url field missing in ${UPDATE_URL}"
+       log_error "$(cat "${version_file}")"
+       return 1
+    fi
+
+    if [ -z "${LATEST_IMAGE_URL}" ]; then
+       log_error "image-url field missing in ${UPDATE_URL}"
+       log_error "$(cat "${version_file}")"
+       return 1
+    fi
+}
+
+check_dependencies() {
+    if ! command -v curl > /dev/null; then
+        die "$(script_name) requires curl"
+    fi
+    if ! command -v wipefs > /dev/null; then
+        die "$(script_name) requires wipefs"
+    fi
+    if ! command -v sfdisk > /dev/null; then
+        die "$(script_name) requires sfdisk"
+    fi
+    if ! command -v whiptail > /dev/null; then
+        DISABLE_UI=1
+    fi
+    if ! command -v rpi-eeprom-digest > /dev/null; then
+        die "$(script_name) requires rpi-eeprom-digest"
+    fi
+    [ -n "${BOOT_BLKDEV}" ] || die "BOOT_BLKDEV not defined"
+    [ -f "${PUBLIC_KEY}" ] || die "Public key ${PUBLIC_KEY} not found. Unable to verify downloads."
+    [ -f "${DT_BOOTLOADER_TRYBOOT}" ] || die "${DT_BOOTLOADER_TRYBOOT} not found. A newer version of the firmware is required."
+    [ -f "${DT_BOOTLOADER_PARTITION}" ] || die "${DT_BOOTLOADER_PARTITION} not found. A newer version of the firmware is required."
+    [ -n "${UPDATE_URL}" ] || die "Update URL not defined"
+}
+
+clean_bootfs() {
+    bootfs="${1}"
+    rm -f "${bootfs}/boot.sig" "${bootfs}/boot.img" "${bootfs}/boot.ver" "${bootfs}/tryboot.pending" "${bootfs}/update.dnl"
+}
+
+do_download() {
+    signature_url="${1}"
+    image_url="${2}"
+    version="${3}"
+    signature_file="${TMP_DIR}/dnl.sig"
+    image_file="${TRYBOOTFS}/update.dnl"
+    version_file="${TRYBOOTFS}/tryboot.ver"
+    mount_boot || die "Failed to mount boot partitions"
+
+    # Check if the update has already been downloaded
+    if [ -f "${TRYBOOT_PENDING_FILE}" ] && [ "$(cat "${version_file}")" -ge "${version}" ]; then
+        log_error "Version ${version} already downloaded."
+        return 1
+    fi
+
+    rm -f "${signature_file}" "${image_file}" "${version_file}"
+    log "Downloading ${signature_url} to ${signature_file}"
+    if ! download_file "${signature_url}" "${signature_file}"; then
+       log_error "Failed to download signature ${signature_url}"
+       return 1
+    fi
+
+    clean_bootfs "${TRYBOOTFS}"
+    log "Downloading ${image_url} to ${image_file}"
+    if ! download_compressed "${image_url}" "${image_file}"; then
+       log_error "Failed to download image ${image_url} to ${image_file}"
+    fi
+
+    if rpi-eeprom-digest -i "${image_file}" -k "${PUBLIC_KEY}" -v "${signature_file}"; then
+        # The update looks valid. Make it available for install.
+        mv -f "${signature_file}" "${TRYBOOTFS}/boot.sig"
+        mv -f "${image_file}" "${TRYBOOTFS}/boot.img"
+        echo "${version}" > "${version_file}"
+        # Signal that an tryboot update is ready
+        touch "${TRYBOOT_PENDING_FILE}"
+        sync
+    else
+        cat "${signature_file}"
+        rm -f "${signature_file}" "${image_file}" "${version_file}"
+        return 1
+    fi
+    return 0
+}
+
+check_tryboot() {
+    TRYBOOT=0
+    TRYBOOT_VER=0
+
+    if [ -f "${TRYBOOTFS}/tryboot.ver" ]; then
+        TRYBOOT_VER=$(cat "${TRYBOOTFS}/tryboot.ver")
+        TRYBOOT=$(printf "%d" "0x$(od "${DT_BOOTLOADER_TRYBOOT}" -v -An -t x1 | tr -d ' ' )")
+    fi
+}
+
+do_upgrade() {
+    # If the tryboot files are present then an upgrade is ready to be tested or if tryboot is enabled
+    # the update was successful so the update can be finished.
+    log "Checking for pending upgrade"
+    check_tryboot
+    if [ "${TRYBOOT}" = 1 ]; then
+       UI_MODE=1
+       log "Upgrading to current TRYBOOT image - version ${CURRENT_VERSION}"
+       if [ "${BOOTFS}" = "${BOOTFS_A}" ]; then
+          write_autoboot A
+       else
+          write_autoboot B
+       fi
+       sync
+       echo "${CURRENT_VERSION}" > "${BOOTFS}/boot.ver"
+       rm -f "${BOOTFS}/tryboot.ver"
+       # Boot with the upgrade on the active partition
+       reboot
+    elif [ "${TRYBOOT_VER}" -gt "${CURRENT_VERSION}" ] && [ -f "${TRYBOOT_PENDING_FILE}" ]; then
+       UI_MODE=1
+       log "Rebooting to test new image version ${TRYBOOT_VER}"
+       # Remove the pending flag to stop infinite tryboot loops!
+       rm -f "${TRYBOOT_PENDING_FILE}"
+       sync
+       log "reboot \"0 tryboot\""
+       reboot "0 tryboot"
+    else
+        # No pending update so clear out any stale files
+        rm -f "${BOOTFS}/upgrade.dnl"
+        rm -f "${BOOTFS}/tryboot.pending"
+        rm -f "${TRYBOOTFS}/tryboot.pending"
+    fi
+}
+
+unmount_disk() {
+    umount "${AUTOBOOT_DEV}" > /dev/null 2>&1 || true
+    umount "${BOOTA_DEV}" > /dev/null 2>&1 || true
+    umount "${BOOTB_DEV}" > /dev/null 2>&1 || true
+    umount "${APPLICATION_DEV}" > /dev/null 2>&1 || true
+}
+
+mount_boot() {
+    mkdir -p "${BOOTFS_AUTO}"
+    mkdir -p "${BOOTFS_A}"
+    mkdir -p "${BOOTFS_B}"
+    umount "${AUTOBOOT_DEV}" > /dev/null 2>&1 || true
+    umount "${BOOTA_DEV}" > /dev/null 2>&1 || true
+    umount "${BOOTB_DEV}" > /dev/null 2>&1 || true
+    mount "${AUTOBOOT_DEV}" "${BOOTFS_AUTO}"
+    mount "${BOOTA_DEV}" "${BOOTFS_A}"
+    mount "${BOOTB_DEV}" "${BOOTFS_B}"
+}
+
+init_disk() {
+    unmount_disk
+    wipefs -a "${AUTOBOOT_DEV}" > /dev/null 2>&1 || true
+    wipefs -a "${BOOTA_DEV}" > /dev/null 2>&1 || true
+    wipefs -a "${BOOTB_DEV}" > /dev/null 2>&1 || true
+    wipefs -a "${APPLICATION_DEV}" > /dev/null 2>&1 || true
+    dd if=/dev/zero of="${BOOT_BLKDEV}" bs=512 count=16 > /dev/null 2>&1 || true
+}
+
+create_fs() {
+    if [ "${1}" = "AUTO" ]; then
+        log "Creating autoboot file-system"
+        mkfs.vfat "${AUTOBOOT_DEV}" -s 2 -F 32 > /dev/null 2>&1
+    elif [ "${1}" = "BOOT_A_B" ]; then
+        log "Creating boot-A file-system"
+        mkfs.vfat "${BOOTA_DEV}" -s 2 -F 32 > /dev/null 2>&1
+        log "Creating boot-B file-system"
+        mkfs.vfat "${BOOTB_DEV}" -s 2 -F 32 > /dev/null 2>&1
+    elif [ "${1}" = "APPLICATION" ]; then
+        log "Creating application file-system"
+        if [ "${ENCRYPT_APPLICATION_FS}" ] && command -v cryptsetup; then
+            create_encrypted_blkdev "${APPLICATION_DEV}"
+            open_encrypted_blkdev "${APPLICATION_DEV}"
+        else
+            APPLICATION_CONTAINER="${APPLICATION_DEV}"
+        fi
+        mkfs.ext4 -F -q "${APPLICATION_CONTAINER}"
+    else
+        die "create_fs: Invalid argument ${1}"
+    fi
+}
+
+setup_disk() {
+    # Partitions the specified block device with a FAT primary partition to
+    # store the boot.img and tryboot.img files plus a large Linux partition for the
+    # application software.
+
+    log "Configuring ${BOOT_BLKDEV} partitions"
+    unmount_disk
+
+    [ -e "${BOOT_BLKDEV}" ]       || die "BOOT_BLKDEV not found."
+    [ -n "${BOOT_PARTITION_MB}" ] || die "BOOT_PARTITION_MB size not specified"
+
+    disk_sectors="$(($(sfdisk -s "${BOOT_BLKDEV}") * 2))"
+    [ "${disk_sectors}" -gt 0 ] || die "Unable to determine capacity of ${BOOT_BLKDEV}"
+    autoboot_offset=16
+    boot_sectors=$((BOOT_PARTITION_MB * 1024 * 2))
+    if [ $((autoboot_offset + boot_sectors * 3)) -ge ${disk_sectors} ]; then
+        die "Disk is too small boot sectors ${boot_sectors} disk sectors ${disk_sectors}"
+    fi
+    boot_size=$((boot_sectors))
+    boota_offset=$((autoboot_offset + boot_size + 1))
+    bootb_offset=$((boota_offset + boot_size + 1))
+    application_offset=$((bootb_offset + boot_size + 1))
+    application_size=$((disk_sectors - application_offset - 1))
+
+    if [ "${1}" = "ALL" ]; then
+       cat <<EOF > "${TMP_DIR}/sfdisk.script"
+label: dos
+label-id: 0x${DISK_ID}
+device: ${BOOT_BLKDEV}
+unit: sectors
+sector-size: 512
+
+${AUTOBOOT_DEV}    : start=${autoboot_offset},   size=${boot_size}, type=c
+${BOOTA_DEV}       : start=${boota_offset},      size=${boot_size}, type=c
+${BOOTB_DEV}       : start=${bootb_offset},      size=${boot_size}, type=c
+${APPLICATION_DEV} : start=${application_offset} size=$((application_size)), type=83
+EOF
+    cat "${TMP_DIR}/sfdisk.script" | sfdisk -f --wipe always -q "${BOOT_BLKDEV}" || \
+        die "Failed to partition disk $(cat "${TMP_DIR}/sfdisk.script")"
+else
+      # Delete the application partition and then append it.
+      sfdisk -f -q --delete "${APPLICATION_DEV}" --wipe always > /dev/null 2>&1 || true
+      cat <<EOF > "${TMP_DIR}/sfdisk.script"
+${APPLICATION_DEV} : start=${application_offset}, size=${application_size}, type=83
+EOF
+      cat "${TMP_DIR}/sfdisk.script" | sfdisk -f -q -a "${BOOT_BLKDEV}" || \
+        die "Failed to create application partition $(cat "${TMP_DIR}/sfdisk.script")"
+    fi
+}
+
+write_autoboot() {
+    if [ "${1}" = B ]; then
+        # Boot from B - A is for downloads
+        cat <<EOF > "${BOOTFS_AUTO}/autoboot.txt"
+[all]
+tryboot_a_b=1
+boot_partition=3
+[tryboot]
+boot_partition=2
+[all]
+EOF
+else
+        # Boot from A - B is for downloads
+        cat <<EOF > "${BOOTFS_AUTO}/autoboot.txt"
+[all]
+tryboot_a_b=1
+boot_partition=2
+[tryboot]
+boot_partition=3
+[all]
+EOF
+    fi
+}
+
+try_install() {
+   # Install software for the first time.
+   clean_bootfs "${TRYBOOTFS}" 
+   TRYBOOT=1
+   get_version &&
+      do_download "${LATEST_SIGNATURE_URL}" "${LATEST_IMAGE_URL}" "${LATEST_VERSION}" &&
+      echo "boot_ramdisk=1" > "${BOOTFS_A}/config.txt" &&
+      echo "boot_ramdisk=1" > "${BOOTFS_B}/config.txt" &&
+      write_autoboot A
+}
+
+wait_block_dev() {
+    dev="/sys/block/$(echo "${BOOT_BLKDEV}" | sed 's/.*\///g')"
+
+    if ! [ -e "${dev}" ]; then
+        while ! [ -e "/${dev}" ]; do
+           rm -f "${LOG_FILE}"
+           log "Please insert boot device ${dev}"
+           sleep 3
+        done
+    fi
+}
+
+do_install() {
+    UI_MODE=1
+    log "Starting new install"
+    wait_block_dev "${BOOT_BLKDEV}"
+    init_disk
+    setup_disk ALL
+    create_fs AUTO
+    create_fs BOOT_A_B
+    create_fs APPLICATION
+    log "$(fdisk -l "${BOOT_BLKDEV}" | grep "${BOOT_BLKDEV}")"
+    mount_boot || die "Failed to mount boot partitions"
+    while ! try_install; do
+        timeout=60
+        log "Retry in ${timeout} seconds"
+        while [ ${timeout} -gt 0 ]; do
+            log -n "."
+            sleep 10
+            timeout=$((timeout - 10))
+        done
+    done
+    # No need for tryboot pending on the initial install
+    rm -f "${TRYBOOT_PENDING_FILE}"
+    log "Setup complete"
+    log "Reboot"
+    reboot
+}
+
+create_encrypted_blkdev() {
+   blkdev="${1}"
+   keyfile="${TMP_DIR}/keyfile"
+
+   [ -e "${blkdev}" ] || die "Block device for encryption not found ${blkdev}"
+
+   log "Creating encrypted file-system"
+   rpi-otp-private-key -b > "${keyfile}" || die "Failed to retrieve private key"
+   cryptsetup -q luksFormat --key-file="${keyfile}" --key-size=256 --type=luks2 "${blkdev}" || die "Failed to setup file-system encryption"
+   rm -f "${keyfile}"
+}
+
+open_encrypted_blkdev() {
+   blkdev="${1}"
+   keyfile="${TMP_DIR}/keyfile"
+
+   [ -e "${blkdev}" ] || die "Block device for encryption not found ${blkdev}"
+
+   rpi-otp-private-key -b > "${keyfile}" || die "Failed to retrieve private key"
+   cryptsetup luksOpen "${blkdev}" application-container --key-file="${keyfile}"
+   APPLICATION_CONTAINER=/dev/mapper/application-container
+   rm -f "${keyfile}"
+}
+
+# Setup some storage for the application
+init_application_partition()  {
+    umount "${APPLICATION_DEV}" > /dev/null 2>&1 || true
+    umount "${APPLICATION_CONTAINER}" > /dev/null 2>&1 || true
+    setup_disk
+    create_fs APPLICATION
+    mount "${APPLICATION_CONTAINER}" "${APPLICATION_MOUNT}" || die "Failed mount application partition"
+    mount_boot || die "Failed to mount boot partitions"
+}
+
+configure_swap() {
+   swapfile="${APPLICATION_MOUNT}/rpi-system-update/swap"
+   if [ "${SWAPFILE_MB}" -gt 0 ]; then
+      if ! [ -f "${swapfile}" ]; then
+         log "Creating ${SWAPFILE_MB} MB swapfile ${swapfile}"
+         dd if=/dev/zero of="${swapfile}" bs=1M count="${SWAPFILE_MB}" > /dev/null 2>&1 && chmod 0600 "${swapfile}" && mkswap "${swapfile}" > /dev/null
+      fi
+      chmod 0600 "${swapfile}"
+      swapon "${swapfile}"
+   else
+      rm -f "${swapfile}"
+   fi
+}
+
+configure_application() {
+   # Replace this function by editing the file specified by RPI_SYSTEM_UPDATE_FUNCTIONS
+   log "Default application configuration"
+}
+
+do_application() {
+    UI_MODE=1
+
+    mkdir -p "${APPLICATION_MOUNT}"
+    if ! [ -d "${APPLICATION_MOUNT}/rpi-system-update" ]; then
+        if ! [ -e "${APPLICATION_DEV}" ]; then
+           init_application_partition || die "Application init failed"
+        else
+           if [ "${ENCRYPT_APPLICATION_FS}" ]; then
+               if cryptsetup luksDump "${APPLICATION_DEV}" > /dev/null 2>&1; then
+                  open_encrypted_blkdev "${APPLICATION_DEV}"
+               else
+                  init_application_partition || die "Application init failed"
+               fi
+           else
+               APPLICATION_CONTAINER="${APPLCIATION_DEV}"
+           fi
+           umount "${APPLICATION_CONTAINER}" > /dev/null 2>&1 || true
+           mount "${APPLICATION_CONTAINER}" "${APPLICATION_MOUNT}" || die "Failed mount application partition"
+        fi
+    fi
+
+    configure_application
+    # Create this sub-directory to indicate that the application is ready.
+    mkdir -p "${APPLICATION_MOUNT}/rpi-system-update"
+    configure_swap || log "Warning: Failed to configure ${swapfile}"
+    log "Ready to start application"
+}
+
+do_monitor() {
+    UI_MODE=1
+    while true; do
+        rm -f "${LOG_FILE}"
+        log "Application running"
+        sleep 10
+    done
+}
+
+usage() {
+cat <<EOF
+Usage: $(basename "${script_name}")
+    Specify the update mode by passing one of -a, -i, -d, or -s.
+
+    -a: Application setup / startup.
+    -d: Downloads the latest update (if available)
+    -i: Setup a fresh system - this ERASES the boot device.
+    -m: Monitors the status of the application.
+    -u: Install the pending upgrade.
+    -h: Displays this message.
+EOF
+exit 0
+}
+
+DOWNLOAD_MODE=0
+INSTALL_MODE=0
+UPGRADE_MODE=0
+APPLICATION_MODE=0
+MONITOR_MODE=0
+while getopts :adhimu option; do
+   case "${option}" in
+   a)
+      APPLICATION_MODE=1
+      ;;
+   d)
+      DOWNLOAD_MODE=1
+      ;;
+   i)
+      INSTALL_MODE=1
+      ;;
+   m)
+      MONITOR_MODE=1
+      ;;
+   u)
+      UPGRADE_MODE=1
+      ;;
+   h) usage
+      ;;
+   *) echo "Unknown argument \"${option}\""
+      usage
+      ;;
+   esac
+done
+
+[ "$(id -u)" = "0" ] || die "* Must be run as root - try sudo ${script_name}"
+
+trap cleanup EXIT
+TMP_DIR="$(mktemp -d)"
+LOG_FILE="${TMP_DIR}/log"
+echo "" > "${LOG_FILE}"
+check_dependencies
+get_boot_partition
+
+if [ -f "${RPI_SYSTEM_UPDATE_FUNCTIONS}" ]; then
+   . "${RPI_SYSTEM_UPDATE_FUNCTIONS}"
+fi
+
+if [ "${APPLICATION_MODE}" = 1 ]; then
+    do_application
+elif [ "${UPGRADE_MODE}" = 1 ]; then
+    [ -d "${BOOTFS}" ] || die "boot filesystem not found at \"${BOOTFS}\""
+    do_upgrade
+elif [ "${DOWNLOAD_MODE}" = 1 ]; then
+    [ -d "${BOOTFS}" ] || die "boot filesystem not found at \"${BOOTFS}\""
+    get_version
+    echo "Update information:"
+    echo "LATEST_VERSION=${LATEST_VERSION}"
+    echo "LATEST_IMAGE_URL=${LATEST_IMAGE_URL}"
+    echo "LATEST_SIGNATURE_URL=${LATEST_SIGNATURE_URL}"
+    if [ "${LATEST_VERSION}" -gt "${CURRENT_VERSION}" ]; then
+       do_download "${LATEST_SIGNATURE_URL}" "${LATEST_IMAGE_URL}" "${LATEST_VERSION}"
+    fi
+elif [ "${INSTALL_MODE}" = 1 ]; then
+    do_install
+elif [ "${MONITOR_MODE}" = 1 ]; then
+    do_monitor
+fi

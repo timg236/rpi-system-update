@@ -1,0 +1,14 @@
+[Unit]
+Description=Application init
+Before=docker.service
+
+[Service]
+Type=oneshot
+# Configures the application partition
+ExecStart=/usr/bin/rpi-system-update -a
+TTYPath=/dev/tty0
+TTYReset=yes
+StandardOutput=tty
+
+[Install]
+WantedBy=multi-user.target

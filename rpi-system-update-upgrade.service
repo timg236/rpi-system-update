@@ -1,0 +1,14 @@
+[Unit]
+Description=OS upgrade check.
+After=boot.mount
+
+[Service]
+Type=oneshot
+# Install a pending upgrade at boot, testing it first with tryboot.
+ExecStart=/usr/bin/rpi-system-update -u
+TTYPath=/dev/tty0
+TTYReset=yes
+StandardOutput=tty
+
+[Install]
+WantedBy=multi-user.target

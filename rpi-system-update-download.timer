@@ -1,0 +1,12 @@
+[Unit]
+Description=OS update timer
+After=boot.mount
+
+[Timer]
+# Assume no RTC so wait a while for NTP
+OnBootSec=2m
+OnCalendar=daily
+Unit=rpi-system-update-download.service
+
+[Install]
+WantedBy=timers.target

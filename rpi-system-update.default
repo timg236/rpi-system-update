@@ -1,0 +1,7 @@
+# rpi-system-update defaults
+BOOTFS_AUTO=/boot/auto
+BOOTFS_A=/boot/boota
+BOOTFS_B=/boot/bootb
+DISK_ID=d0d0cafe
+PUBLIC_KEY=/var/lib/rpi-system-update/rpi-system-update.pem
+SWAPFILE_MB=256
