@@ -41,10 +41,12 @@ BOOTFS=
 TRYBOOTFS=
 TRYBOOT_PENDING_FILE=
 LOG_FILE=
+TITLE=""
+SYSTEM_DHCP=end0
 script_name="$0"
 
 update_status() {
-   ETH0_IP4_ADDR="$(ip addr show dev eth0 | grep "inet " | awk '{print $2}')"
+   ETH0_IP4_ADDR="$(ip addr show dev ${SYSTEM_DHCP} | grep "inet " | awk '{print $2}')"
    WLAN0_IP4_ADDR="$(ip addr show dev wlan0 | grep "inet " | awk '{print $2}')"
 }
 
@@ -58,7 +60,7 @@ log() {
             update_status
             TERM=linux NEWT_COLORS="${NEWT_COLORS}" \
                whiptail \
-               --title "Raspberry Pi - system-update v${CURRENT_VERSION} eth0: ${ETH0_IP4_ADDR} wlan: ${WLAN0_IP4_ADDR} $(date)" \
+               --title "Raspberry Pi - system-update v${CURRENT_VERSION} ${SYSTEM_DHCP}: ${ETH0_IP4_ADDR} wlan: ${WLAN0_IP4_ADDR} $(date)" \
                --infobox "$(tail -n 18 "${LOG_FILE}")" 20 150
         fi
     else
@@ -521,7 +523,7 @@ configure_application() {
 
 do_application() {
     UI_MODE=1
-
+    log "Starting application"
     mkdir -p "${APPLICATION_MOUNT}"
     if ! [ -d "${APPLICATION_MOUNT}/rpi-system-update" ]; then
         if ! [ -e "${APPLICATION_DEV}" ]; then
