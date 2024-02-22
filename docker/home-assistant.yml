@@ -9,4 +9,4 @@ services:
     restart: unless-stopped
     privileged: true
     network_mode: host
-    
+    platform: linux/arm64/v8     
