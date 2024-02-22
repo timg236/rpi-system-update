@@ -1,14 +1,14 @@
 # Raspberry Pi System Update
 
-## Overview
-Raspberry Pi System Update is example Raspberry Pi4 buildroot configuration 
-with script extensions that implement a self-updating system-software image 
-which is also compatible with secure-boot.
+Just enough buildroot to run docker applications from a light weight
+OS wrapper providing verified boot, A/B booting, updates and file system
+encryption.
 
+## Intro
 The high level approach is to have a single file boot ramdisk that contains
 a bootable Linux initramfs that is capable of updating itself and installing
 an application component. This image can be signed for secure-boot and
-launched using the Raspberry Pi 4 network-install feature in the bootloader.
+launched using the Raspberry Pi 4 (or newer) network-install feature in the bootloader.
 
 The application component is installed to a local block device (e.g. MMC). 
 Typically, a self-updating service such as docker would be used as in this example
@@ -20,15 +20,22 @@ for the buildroot packages and defconfig.
 The software update process is separate from the component which downloads
 new updates to install.  For simplicity, this example uses scripts `curl` to download updates.
 
+## Goals
+* Runs on Raspberry Pi 4 and Pi 5 family.
+* Minimal patches to core buildroot.
+* Easy for users to customize the setup scripts as desired e.g. custom docker setup.
+* Easy to verify / understand security model.
+* Replacable FOTA model (for when wget isn't enough!)
+
 ## System software
 The system-software in the boot ramdisk contains:-
 
-* Raspberry Pi GPU firmware (aka start.elf)
 * Linux Kernel
 * Device-tree overlays
 * initramfs containing modules and software required to install and launch
   the application component (e.g. Docker)
 * A RSA public key used to verify updates.
+* Raspberry Pi GPU firmware (aka start.elf) for Pi4 family.
 
 ### Secure-boot
 This package shows how signed boot images can be used to securely provision and upgrade the system.
@@ -42,16 +49,6 @@ The key must have already been programmed e.g using the `rpi-otp-private-key` ut
 **IMPORTANT:**
 * Since this is an example UART login is enabled in order to debug / experiment with the update scripts.
   In a production system this should be disabled when deciding what if any remote access should be permitted.
-
-### Recommended hardware
-Raspberry Pi 4B / Compute Module 4 with at least 2GB of RAM.
-
-It may be possible to reduce memory usage further by:-  
-
-* Removing any unecessary kernel modules or other files from the initramfs.
-* Switching to `start4cd.elf` (also requires setting `gpu_mem=16` in `config.txt`)
-* Disabling HDMI, KMS, FKMS
-* Adding a small swap file on the application partition.
 
 ## Architecture
 The system consists of four main components:-
@@ -176,7 +173,7 @@ make raspberrypi-system-update_defconfig && make rpi-system-update-reconfigure &
 ```
 
 ### Building the network-install image
-The network-install image is optmized for size (32-bit kernel) and needs to be built in a different tree.
+The network-install image is optimized for size (32-bit kernel) and needs to be built in a different tree.
 However, it's unlikely that this would need to be updated frequently because it's sole purpose is to
 download and install the real `boot.img`.
 ```
