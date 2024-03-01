@@ -25,6 +25,7 @@ NEWT_COLORS="${NEWT_COLORS:-root=blue,blue window=,white border=black,white text
 SWAPFILE_MB=${SWAPFILE_MB:-0}
 RPI_SYSTEM_UPDATE_FUNCTIONS=${RPI_SYSTEM_UPDATE_FUNCTIONS:-/usr/lib/rpi-system-update/functions}
 ENCRYPT_APPLICATION_FS=${ENCRYPT_APPLICATION_FS:-0}
+ENCRYPT_APPLICATION_GENERATE_KEY=${ENCRYPT_APPLICATION_GENERATE_KEY:-0}
 
 # Constants
 DT_BOOTLOADER_TRYBOOT=/proc/device-tree/chosen/bootloader/tryboot
@@ -473,6 +474,12 @@ create_encrypted_blkdev() {
    keyfile="${TMP_DIR}/keyfile"
 
    [ -e "${blkdev}" ] || die "Block device for encryption not found ${blkdev}"
+
+   # Use the RNG to generate a device specific private key for LUKS
+   # if the OTP key is all zeros.
+   if [ "${ENCRYPT_APPLICATION_GENERATE_KEY}" = 1 ] && ! rpi-otp-private-key -c; then
+      rpi-otp-private-key -y -w "$(openssl rand -hex 32)"
+   fi
 
    log "Creating encrypted file-system"
    rpi-otp-private-key -b > "${keyfile}" || die "Failed to retrieve private key"
