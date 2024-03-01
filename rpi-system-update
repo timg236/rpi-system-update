@@ -139,12 +139,12 @@ get_version() {
     rm -f "${version_file}" "${version_sig}"
 
     if ! download_file "${UPDATE_URL}/version.sig" "${version_sig}"; then
-       log_error "Failed to download version signature from \"${UPDATE_URL}.sig\""
+       log_error "Failed to download version signature from \"${UPDATE_URL}/version.sig\""
        return 1
     fi
 
     if ! download_file "${UPDATE_URL}/version" "${version_file}"; then
-       log_error "Failed to get version information from \"${UPDATE_URL}\""
+       log_error "Failed to get version information from \"${UPDATE_URL}/version\""
        return 1
     fi
 

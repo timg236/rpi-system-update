@@ -8,6 +8,7 @@ ExecStart=/usr/bin/rpi-system-update -i
 TTYPath=/dev/tty0
 TTYReset=yes
 StandardOutput=tty
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
